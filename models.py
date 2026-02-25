@@ -13,8 +13,6 @@ class GConfig:
     field_res: int = 16
     K: int = 64
     num_blocks: int = 2
-    ch_256: int = 64
-    ch_512: int = 32
 
 cfg = GConfig()
 
@@ -158,7 +156,7 @@ class GrassmannSeed(nn.Module):
         
         # 投影到空间基底 [B, K, H, W]
         g0 = torch.einsum("bkr,rhw->bkhw", q, self.atoms.to(z.dtype))
-        return g0,q
+        return g0 , q
         
 class Generator(nn.Module):
     def __init__(self, ngf=64, nz=100, nc=3, im_size=1024, use_grassmann=False):
@@ -207,16 +205,11 @@ class Generator(nn.Module):
                 batchNorm2d(nfc[16]),
                 nn.LeakyReLU(0.1),
             )
-            self.a16 = nn.Parameter(torch.tensor(0.05))
-            # QFiLM 作用在 feat_128 上：C 必须等于 nfc[128]
             self.qfilm_128 = QFiLM(K=K, C=nfc[128], r=16, mode="mean", gamma_scale=0.3)
-
             # GCSE 作用在 feat_256 上：C 必须等于 nfc[256]
             self.gcse_256 = GCSE(K=K, C=nfc[256], pool=4)
             self.gcse_128 = GCSE(K=K, C=nfc[128], pool=4)
             self.gcse_64 = GCSE(K=K, C=nfc[64], pool=4)
-            # 注入强度（建议很小，避免训练炸）
-            self.g_inject = nn.Parameter(torch.tensor(0.1))
     def forward(self, input):
         if self.use_grassmann:
             g0, q = self.seed(input)
