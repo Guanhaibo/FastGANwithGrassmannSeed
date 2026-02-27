@@ -21,9 +21,68 @@ import matplotlib.pyplot as plt
 percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
 lossD_list = []
 lossG_list = []
+'''
+from cleanfid import fid
 
-#torch.backends.cudnn.benchmark = True
+# 在 train(args) 函数内部，定义好路径后加入：
+dataset_name = "cat_dataset_256"  # 给你的数据集起个名
+if not fid.test_stats_exists(dataset_name, mode="clean"):
+    print(f"计算真实数据的统计量 (Stats) 中...")
+    fid.make_custom_stats(dataset_name, img_path, mode="clean")
+@torch.no_grad()
+def calculate_fid_at_step(netG, avg_param_G, iteration, device, dataset_name, num_samples=2000):
+    """
+    netG: 当前生成器模型
+    avg_param_G: EMA 权重列表
+    """
+    netG.eval()
+    # 1. 创建一个临时模型并加载 EMA 参数
+    # 注意：这里需要先把 EMA 参数加载回模型
+    backup_param = copy_G_params(netG)
+    load_params(netG, avg_param_G) 
+    
+    temp_dir = f"./temp_fid_{iteration}"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # 2. 生成假样本
+    print(f"正在生成 {num_samples} 张样本用于 FID 计算...")
+    batch_size = 16
+    for i in range(0, num_samples, batch_size):
+        z = torch.randn(batch_size, 100, device=device)
+        fake_imgs = netG(z)[0] # 假设第一个是最高分辨率
+        fake_imgs = (fake_imgs + 1.0) / 2.0 # 归一化到 [0,1]
+        for j in range(fake_imgs.size(0)):
+            save_image(fake_imgs[j], os.path.join(temp_dir, f"{i+j}.png"))
+            
+    # 3. 计算 FID
+    score = fid.compute_fid(temp_dir, dataset_name=dataset_name, mode="clean")
+    
+    # 4. 恢复原始参数并清理
+    load_params(netG, backup_param)
+    import shutil
+    shutil.rmtree(temp_dir)
+    netG.train()
+    
+    return score
+'''
+def zero_center_gp(d_out, x_in):
+    """
+    d_out: D(x) 的输出，形状通常是 [B] 或 [2B] 或 [B, ...] 都行（你这里是 torch.cat 后的一维向量）:contentReference[oaicite:1]{index=1}
+    x_in: 输入到 D 的真实图像张量，shape [B,C,H,W]，requires_grad=True
+    """
+    # 保证是标量输出做 grad
+    d_sum = d_out.sum()
+    grad = torch.autograd.grad(
+        outputs=d_sum,
+        inputs=x_in,
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True
+    )[0]  # [B,C,H,W]
+    grad = grad.view(grad.size(0), -1)
+    return (grad.pow(2).sum(dim=1)).mean()  # E[||∇x D(x)||^2]
 
+    
 def crop_image_by_part(image, part):
     hw = image.shape[2]//2
     if part==0:
@@ -36,23 +95,23 @@ def crop_image_by_part(image, part):
         return image[:,:,hw:,hw:]
 
 def train_d(net, data, label="real"):
-    """Train function of discriminator"""
-    if label=="real":
+    """Return (pred_mean, loss_tensor, optional rec imgs...) WITHOUT backward."""
+    if label == "real":
         part = random.randint(0, 3)
         pred, [rec_all, rec_small, rec_part] = net(data, label, part=part)
-        err = F.relu(  torch.rand_like(pred) * 0.2 + 0.8 -  pred).mean() + \
-            percept( rec_all, F.interpolate(data, rec_all.shape[2]) ).sum() +\
-            percept( rec_small, F.interpolate(data, rec_small.shape[2]) ).sum() +\
-            percept( rec_part, F.interpolate(crop_image_by_part(data, part), rec_part.shape[2]) ).sum()
-        err.backward()
-        return pred.mean().item(), rec_all, rec_small, rec_part
+
+        loss = F.relu(torch.rand_like(pred) * 0.2 + 0.8 - pred).mean() + \
+               percept(rec_all,  F.interpolate(data, rec_all.shape[2])).mean() + \
+               percept(rec_small, F.interpolate(data, rec_small.shape[2])).mean() + \
+               percept(rec_part,  F.interpolate(crop_image_by_part(data, part), rec_part.shape[2])).mean()
+
+        return pred.mean().item(), loss, rec_all, rec_small, rec_part
+
     else:
         pred = net(data, label)
-        err = F.relu( torch.rand_like(pred) * 0.2 + 0.8 + pred).mean()
-        err.backward()
-        return pred.mean().item()
-        
-
+        loss = F.relu(torch.rand_like(pred) * 0.2 + 0.8 + pred).mean()
+        return loss
+    
 def train(args):
 
     data_root = args.path
@@ -133,11 +192,29 @@ def train(args):
         real_image = DiffAugment(real_image, policy=policy)
         fake_images = [DiffAugment(fake, policy=policy) for fake in fake_images]
         
-        ## 2. train Discriminator
-        netD.zero_grad()
+        ## 2. train Discriminator (with Lazy R1)
+        optimizerD.zero_grad(set_to_none=True)
+        # 1) 真实分支：你原来的“重建 + hinge real”loss（label="real" 走重建）
+        err_dr, loss_real, rec_img_all, rec_img_small, rec_img_part = train_d(netD, real_image, label="real")
+        # 2) 假分支：你原来的 hinge fake loss（输入是 list）
+        fake_detached = [fi.detach() for fi in fake_images]
+        loss_fake = train_d(netD, fake_detached, label="fake")
+        loss_D = loss_real + loss_fake
+        #R1R2的损失
+        if (iteration % 16) == 0:
+            # -------- R1 on real --------
+            real_image = real_image.detach().requires_grad_(True)
+            d_real_for_r1 = netD(real_image, label="fake")
+            r1 = zero_center_gp(d_real_for_r1, real_image)
+        
+            # -------- R2 on fake (use highest-res fake only) --------
+            fake0 = fake_images[0].detach().requires_grad_(True)  # leaf tensor
+            d_fake_for_r2 = netD(fake0, label="fake")           # 注意：D 期待 list，这里传 [fake0]
+            r2 = zero_center_gp(d_fake_for_r2, fake0)
 
-        err_dr, rec_img_all, rec_img_small, rec_img_part = train_d(netD, real_image, label="real")
-        train_d(netD, [fi.detach() for fi in fake_images], label="fake")
+            loss_D = loss_D + 0.1 * r1 + 0.1 * r2
+        
+        loss_D.backward()
         optimizerD.step()
         
         ## 3. train Generator
@@ -147,14 +224,13 @@ def train(args):
 
         err_g.backward()
         optimizerG.step()
-
-
         
         lossD_list.append(err_dr)  # 记录 D loss 数值
         lossG_list.append(-err_g.item())  # 记录 G loss 数值
         for p, avg_p in zip(netG.parameters(), avg_param_G):
             avg_p.mul_(0.999).add_(0.001 * p.data)
-        if iteration %200 == 0:
+
+        if iteration % 200 == 0:
             steps = list(range(len(lossD_list)))
             plt.figure(figsize=(8, 5))
             plt.plot(steps, lossD_list, label="D(real)")
@@ -166,6 +242,7 @@ def train(args):
             loss_fig_path = os.path.join(saved_image_folder, "loss_curve.png")
             plt.savefig(loss_fig_path)
             print("Loss curve saved to:", loss_fig_path)
+            
         if iteration % 100 == 0:
             print("GAN: loss d: %.5f    loss g: %.5f"%(err_dr, -err_g.item()))
           
@@ -176,8 +253,7 @@ def train(args):
                 # 反归一化到 [0,1]
                 img_grid = (fixed_fake_imgs + 1.0) / 2.0 
                 save_image(img_grid, f"{saved_image_folder}/iter_{iteration}.jpg", nrow=4)
-                save_image( torch.cat([
-                        F.interpolate(real_image, 128), 
+                save_image( torch.cat([ 
                         rec_img_all, rec_img_small,
                         rec_img_part]).add(1).mul(0.5), saved_image_folder+'/rec_%d.jpg'%iteration )
         
@@ -186,12 +262,9 @@ def train(args):
                 "iter": iteration,
                 "g": netG.state_dict(),
                 "d": netD.state_dict(),
-                "ema": {k: v.detach().clone() for k, v in ema.items()} if "ema" in locals() else None,
-                # Optimizer states are not saved here either
                 "opt_g": optimizerG.state_dict(),
                 "opt_d": optimizerD.state_dict(),
             }, os.path.join(saved_model_folder, f"all_{iteration}.pth"))
-            
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='region gan')
 
@@ -199,11 +272,11 @@ if __name__ == "__main__":
     parser.add_argument('--output_path', type=str, default='./', help='Output path for the train results')
     parser.add_argument('--cuda', type=int, default=0, help='index of gpu to use')
     parser.add_argument('--name', type=str, default='Base', help='experiment name')
-    parser.add_argument('--iter', type=int, default=250000, help='number of iterations')
+    parser.add_argument('--iter', type=int, default=2000000, help='number of iterations')
     parser.add_argument('--start_iter', type=int, default=0, help='the iteration to start training')
     parser.add_argument('--batch_size', type=int, default=32, help='mini batch number of images')
     parser.add_argument('--im_size', type=int, default=256, help='image resolution')
-    parser.add_argument('--ckpt', type=str, default='./all_85000.pth', help='checkpoint weight path if have one')
+    parser.add_argument('--ckpt', type=str, default='./all_165000.pth', help='checkpoint weight path if have one')
     parser.add_argument('--workers', type=int, default=2, help='number of workers for dataloader')
     parser.add_argument('--save_interval', type=int, default=100, help='number of iterations to save model')
     parser.add_argument('--lr', type=float, default=0.0002, help='learn')
