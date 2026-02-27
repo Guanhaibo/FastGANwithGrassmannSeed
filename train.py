@@ -15,9 +15,9 @@ from models import weights_init, Discriminator, Generator
 from operation import copy_G_params, load_params, get_dir
 from operation import ImageFolder, InfiniteSamplerWrapper
 from diffaug import DiffAugment
-policy = 'color,translation'
 import lpips
 import matplotlib.pyplot as plt
+policy = 'color,translation'
 percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
 lossD_list = []
 lossG_list = []
@@ -109,7 +109,7 @@ def train(args):
         num_workers=args.workers,
         pin_memory=True
     )
-    dataloader = iter(dataloader)  # ✅ 创建迭代器
+    dataloader = iter(dataloader)
     
     # 2. 初始化 BERT
     #bert = BertConditioner(device)
@@ -156,7 +156,7 @@ def train(args):
         fake_detached = [fi.detach() for fi in fake_images]
         loss_fake = train_d(netD, fake_detached, label="fake")
         loss_D = loss_real + loss_fake
-        #R1R2的损失
+        # R1\R2 的 损失
         if (iteration % 16) == 0:
             # -------- R1 on real --------
             real_image = real_image.detach().requires_grad_(True)
