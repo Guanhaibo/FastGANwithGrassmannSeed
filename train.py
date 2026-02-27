@@ -21,50 +21,6 @@ import matplotlib.pyplot as plt
 percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
 lossD_list = []
 lossG_list = []
-'''
-from cleanfid import fid
-
-# 在 train(args) 函数内部，定义好路径后加入：
-dataset_name = "cat_dataset_256"  # 给你的数据集起个名
-if not fid.test_stats_exists(dataset_name, mode="clean"):
-    print(f"计算真实数据的统计量 (Stats) 中...")
-    fid.make_custom_stats(dataset_name, img_path, mode="clean")
-@torch.no_grad()
-def calculate_fid_at_step(netG, avg_param_G, iteration, device, dataset_name, num_samples=2000):
-    """
-    netG: 当前生成器模型
-    avg_param_G: EMA 权重列表
-    """
-    netG.eval()
-    # 1. 创建一个临时模型并加载 EMA 参数
-    # 注意：这里需要先把 EMA 参数加载回模型
-    backup_param = copy_G_params(netG)
-    load_params(netG, avg_param_G) 
-    
-    temp_dir = f"./temp_fid_{iteration}"
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # 2. 生成假样本
-    print(f"正在生成 {num_samples} 张样本用于 FID 计算...")
-    batch_size = 16
-    for i in range(0, num_samples, batch_size):
-        z = torch.randn(batch_size, 100, device=device)
-        fake_imgs = netG(z)[0] # 假设第一个是最高分辨率
-        fake_imgs = (fake_imgs + 1.0) / 2.0 # 归一化到 [0,1]
-        for j in range(fake_imgs.size(0)):
-            save_image(fake_imgs[j], os.path.join(temp_dir, f"{i+j}.png"))
-            
-    # 3. 计算 FID
-    score = fid.compute_fid(temp_dir, dataset_name=dataset_name, mode="clean")
-    
-    # 4. 恢复原始参数并清理
-    load_params(netG, backup_param)
-    import shutil
-    shutil.rmtree(temp_dir)
-    netG.train()
-    
-    return score
-'''
 def zero_center_gp(d_out, x_in):
     """
     d_out: D(x) 的输出，形状通常是 [B] 或 [2B] 或 [B, ...] 都行（你这里是 torch.cat 后的一维向量）:contentReference[oaicite:1]{index=1}
