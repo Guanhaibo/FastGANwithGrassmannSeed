@@ -31,10 +31,6 @@ percept = lpips.PerceptualLoss(model="net-lin", net="vgg", use_gpu=True)
 lossD_list = []
 lossG_list = []
 
-
-# -----------------------------
-# Utilities
-# -----------------------------
 def zero_center_gp(d_out, x_in):
     """
     Zero-centered gradient penalty: E[||∇x D(x)||^2]
@@ -112,14 +108,13 @@ class EMA:
             for k in self.shadow:
                 self.shadow[k] = self.shadow[k].to(self.device)
 
+    def register(self):
+        self.shadow = {k: p.detach().clone() for k, p in self.model.named_parameters()}
+    
     @torch.no_grad()
     def update(self):
-        msd = self.model.state_dict()
-        for k, v in msd.items():
-            if k not in self.shadow:
-                self.shadow[k] = v.detach().clone()
-                continue
-            self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
+        for k, p in self.model.named_parameters():
+            self.shadow[k].mul_(self.decay).add_(p.detach(), alpha=1 - self.decay)
 
     def apply_to(self):
         """Apply EMA weights to model (backup current weights first)."""
@@ -346,12 +341,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output_path", type=str, default="./", help="Output path for the train results")
     parser.add_argument("--cuda", type=int, default=0, help="index of gpu to use")
-    parser.add_argument("--name", type=str, default="Base", help="experiment name")
+    parser.add_argument("--name", type=str, default="Neww", help="experiment name")
     parser.add_argument("--iter", type=int, default=2000000, help="number of iterations")
     parser.add_argument("--start_iter", type=int, default=0, help="the iteration to start training")
     parser.add_argument("--batch_size", type=int, default=32, help="mini batch number of images")
     parser.add_argument("--im_size", type=int, default=256, help="image resolution")
-    parser.add_argument("--ckpt", type=str, default="./all_165000.pth", help="checkpoint weight path if have one")
+    parser.add_argument("--ckpt", type=str, default=None, help="checkpoint weight path if have one")
     parser.add_argument("--workers", type=int, default=2, help="number of workers for dataloader")
     parser.add_argument("--save_interval", type=int, default=100, help="number of iterations to save model")
     parser.add_argument("--lr", type=float, default=0.0002, help="learn")
